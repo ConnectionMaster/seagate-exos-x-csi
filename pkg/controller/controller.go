@@ -4,25 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
-	storageapi "github.com/Seagate/seagate-exos-x-api-go"
+	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
+	"github.com/Seagate/seagate-exos-x-api-go/v2/pkg/client"
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
+	"github.com/Seagate/seagate-exos-x-csi/pkg/node_service"
+	pb "github.com/Seagate/seagate-exos-x-csi/pkg/node_service/node_servicepb"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog"
-)
-
-const (
-	snapshotNotFoundErrorCode             = -10050
-	hostMapDoesNotExistsErrorCode         = -10074
-	volumeNotFoundErrorCode               = -10075
-	volumeHasSnapshot                     = -10183
-	snapshotAlreadyExists                 = -10186
-	initiatorNicknameOrIdentifierNotFound = -10386
-	unmapFailedErrorCode                  = -10509
+	"k8s.io/klog/v2"
 )
 
 var volumeCapabilities = []*csi.VolumeCapability{
@@ -58,7 +54,9 @@ var nonAuthenticatedMethods = []string{
 type Controller struct {
 	*common.Driver
 
-	client *storageapi.Client
+	client             *storageapi.Client
+	nodeServiceClients map[string]*grpc.ClientConn
+	runPath            string
 }
 
 // DriverCtx contains data common to most calls
@@ -72,8 +70,14 @@ type DriverCtx struct {
 func New() *Controller {
 	client := storageapi.NewClient()
 	controller := &Controller{
-		Driver: common.NewDriver(client.Collector),
-		client: client,
+		Driver:             common.NewDriver(client.Collector),
+		client:             client,
+		runPath:            fmt.Sprintf("/var/run/%s", common.PluginName),
+		nodeServiceClients: map[string]*grpc.ClientConn{},
+	}
+
+	if err := os.MkdirAll(controller.runPath, 0755); err != nil {
+		panic(err)
 	}
 
 	controller.InitServer(
@@ -108,13 +112,24 @@ func New() *Controller {
 			if err != nil {
 				return nil, err
 			}
-
 			return handler(ctx, req)
 		},
 	)
 
 	csi.RegisterIdentityServer(controller.Server, controller)
 	csi.RegisterControllerServer(controller.Server, controller)
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT,
+	)
+	go func() {
+		_ = <-sigc
+		controller.Stop()
+	}()
 
 	return controller
 }
@@ -145,24 +160,24 @@ func (controller *Controller) ControllerGetCapabilities(ctx context.Context, req
 	return &csi.ControllerGetCapabilitiesResponse{Capabilities: csc}, nil
 }
 
-// ValidateVolumeCapabilities checks whether the volume capabilities requested
-// are supported.
+// ValidateVolumeCapabilities checks whether a provisioned volume supports the capabilities requested
 func (controller *Controller) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
-	volumeID := req.GetVolumeId()
-	if len(volumeID) == 0 {
+	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
+
+	if len(volumeName) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "cannot validate volume with empty ID")
 	}
 	if len(req.GetVolumeCapabilities()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "cannot validate volume without capabilities")
 	}
-	_, _, err := controller.client.ShowVolumes(volumeID)
+	_, _, err := controller.client.ShowVolumes(volumeName)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "cannot validate volume not found")
 	}
 
 	return &csi.ValidateVolumeCapabilitiesResponse{
 		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
-			VolumeCapabilities: volumeCapabilities,
+			VolumeCapabilities: req.GetVolumeCapabilities(),
 		},
 	}, nil
 }
@@ -219,6 +234,7 @@ func (controller *Controller) configureClient(credentials map[string]string) err
 	username := string(credentials[common.UsernameSecretKey])
 	password := string(credentials[common.PasswordSecretKey])
 	apiAddr := string(credentials[common.APIAddressConfigKey])
+	secondaryapiAddr := string(credentials[common.APIAddressBConfigKey])
 
 	if len(username) == 0 {
 		return status.Error(codes.InvalidArgument, fmt.Sprintf("(%s) is missing from secrets", common.UsernameSecretKey))
@@ -228,20 +244,24 @@ func (controller *Controller) configureClient(credentials map[string]string) err
 		return status.Error(codes.InvalidArgument, fmt.Sprintf("(%s) is missing from secrets", common.PasswordSecretKey))
 	}
 
+	// at least one api address must be defined, the secondary address is an optional parameter
 	if len(apiAddr) == 0 {
 		return status.Error(codes.InvalidArgument, fmt.Sprintf("(%s) is missing from secrets", common.APIAddressConfigKey))
 	}
 
-	klog.Infof("using API at address (%s)", apiAddr)
-	if controller.client.SessionValid(apiAddr, username) {
-		return nil
+	apiAddresses := []string{apiAddr}
+	if secondaryapiAddr != "" {
+		apiAddresses = append(apiAddresses, secondaryapiAddr)
 	}
+	klog.InfoS("using API", "addresses", apiAddresses)
 
-	controller.client.Username = username
-	controller.client.Password = password
-	controller.client.Addr = apiAddr
-	klog.Infof("login to API address %q as user %q", controller.client.Addr, controller.client.Username)
-	err := controller.client.Login()
+	controller.client.StoreCredentials(apiAddresses, "", username, password)
+
+	ctx := context.WithValue(context.Background(), client.ContextBasicAuth, client.BasicAuth{
+		UserName: username,
+		Password: password,
+	})
+	err := controller.client.Login(ctx)
 	if err != nil {
 		return status.Error(codes.Unauthenticated, err.Error())
 	}
@@ -266,9 +286,6 @@ func runPreflightChecks(parameters map[string]string, capabilities *[]*csi.Volum
 		return nil
 	}
 
-	if err := checkIfKeyExistsInConfig(common.FsTypeConfigKey); err != nil {
-		return err
-	}
 	if err := checkIfKeyExistsInConfig(common.PoolConfigKey); err != nil {
 		return err
 	}
@@ -278,11 +295,78 @@ func runPreflightChecks(parameters map[string]string, capabilities *[]*csi.Volum
 			return status.Error(codes.InvalidArgument, "missing volume capabilities")
 		}
 		for _, capability := range *capabilities {
-			if capability.GetAccessMode().GetMode() != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
-				return status.Error(codes.FailedPrecondition, "storage only supports ReadWriteOnce access mode")
+			accessMode := capability.GetAccessMode().GetMode()
+			accessModeSupported := false
+			for _, mode := range common.SupportedAccessModes {
+				if accessMode == mode {
+					accessModeSupported = true
+				}
+			}
+			if !accessModeSupported {
+				return status.Errorf(codes.FailedPrecondition, "driver does not support access mode %v", accessMode)
+			}
+			if mount := capability.GetMount(); mount != nil {
+				if mount.GetFsType() == "" {
+					if err := checkIfKeyExistsInConfig(common.FsTypeConfigKey); err != nil {
+						return status.Error(codes.FailedPrecondition, "no fstype specified in storage class")
+					} else {
+						klog.InfoS("storage class parameter "+common.FsTypeConfigKey+" is deprecated. Please migrate to 'csi.storage.k8s.io/fstype'", "parameter", common.FsTypeConfigKey)
+					}
+				}
 			}
 		}
 	}
-
 	return nil
+}
+
+// Makes an RPC call to the specified node to retrieve initiators of the specified type (iSCSI,FC,SAS)
+// Handles re-use of the relatively expensive grpc Channel(grpc.ClientConn)
+// The gRPC stub is created and destroyed on each call
+func (controller *Controller) GetNodeInitiators(ctx context.Context, nodeAddress string, protocol string) ([]string, error) {
+	var reqType pb.InitiatorType
+	switch protocol {
+	case common.StorageProtocolSAS:
+		reqType = pb.InitiatorType_SAS
+	case common.StorageProtocolFC:
+		reqType = pb.InitiatorType_FC
+	case common.StorageProtocolISCSI:
+		reqType = pb.InitiatorType_ISCSI
+	}
+
+	clientConnection := controller.nodeServiceClients[nodeAddress]
+	if clientConnection == nil {
+		klog.V(3).InfoS("node grpc client not found, establishing...", "nodeAddress", nodeAddress)
+		var err error
+		clientConnection, err = node_service.InitializeClient(nodeAddress)
+		if err != nil {
+			return nil, err
+		}
+		controller.nodeServiceClients[nodeAddress] = clientConnection
+	}
+	initiators, err := node_service.GetNodeInitiators(ctx, clientConnection, reqType)
+	return initiators, err
+}
+
+func (controller *Controller) NotifyUnmap(ctx context.Context, nodeAddress string, volumeWWN string) error {
+	clientConnection := controller.nodeServiceClients[nodeAddress]
+	if clientConnection == nil {
+		klog.V(3).InfoS("node grpc client not found, establishing...", "nodeAddress", nodeAddress)
+		var err error
+		clientConnection, err = node_service.InitializeClient(nodeAddress)
+		if err != nil {
+			return err
+		}
+		controller.nodeServiceClients[nodeAddress] = clientConnection
+	}
+	return node_service.NotifyUnmap(ctx, clientConnection, volumeWWN)
+}
+
+// Graceful shutdown of Node-Controller RPC Clients
+func (controller *Controller) Stop() {
+	klog.V(3).InfoS("Controller code graceful shutdown..")
+	for nodeIP, clientConn := range controller.nodeServiceClients {
+		klog.V(3).InfoS("Closing node client", "nodeIP", nodeIP)
+		clientConn.Close()
+	}
+	controller.Driver.Stop()
 }

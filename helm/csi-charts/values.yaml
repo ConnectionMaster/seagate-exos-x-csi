@@ -6,91 +6,78 @@
 kubeletPath: /var/lib/kubelet
 # -- Wether psp admission controller has been enabled in the cluster or not
 pspAdmissionControllerEnabled: false
-
 image:
   # -- Docker repository to use for nodes and controller
   repository: ghcr.io/seagate/seagate-exos-x-csi
   # -- Tag to use for nodes and controller
   # @default -- Uses Chart.appVersion value by default if tag does not specify a new version.
-  tag: "v1.0.12"
+  tag: "v1.10.0"
   # -- Default is set to IfNotPresent, to override use Always here to always pull the specified version
   pullPolicy: Always
-
-# -- Controller sidecar for provisionning
+# -- Controller sidecar for provisioning
+# AKA external-provisioner
 csiProvisioner:
   image:
-    repository: k8s.gcr.io/sig-storage/csi-provisioner
-    tag: v3.0.0
+    repository: registry.k8s.io/sig-storage/csi-provisioner
+    tag: v5.0.1
   # -- Timeout for gRPC calls from the csi-provisioner to the controller
-  timeout: 30s
+  timeout: 60s
   # -- Extra arguments for csi-provisioner controller sidecar
   extraArgs: []
-
 # -- Controller sidecar for attachment handling
 csiAttacher:
   image:
-    repository: k8s.gcr.io/sig-storage/csi-attacher
-    tag: v3.3.0
+    repository: registry.k8s.io/sig-storage/csi-attacher
+    tag: v4.6.1
   # -- Timeout for gRPC calls from the csi-attacher to the controller
-  timeout: 30s
+  timeout: 60s
   # -- Extra arguments for csi-attacher controller sidecar
   extraArgs: []
-
 # -- Controller sidecar for volume expansion
 csiResizer:
   image:
-    repository: k8s.gcr.io/sig-storage/csi-resizer
-    tag: v1.3.0
+    repository: registry.k8s.io/sig-storage/csi-resizer
+    tag: v1.11.1
   # -- Extra arguments for csi-resizer controller sidecar
   extraArgs: []
-
 # -- Controller sidecar for snapshots handling
 csiSnapshotter:
   image:
-    repository: k8s.gcr.io/sig-storage/csi-snapshotter
-    tag: v4.2.1
+    repository: registry.k8s.io/sig-storage/csi-snapshotter
+    tag: v8.0.1
   # -- Extra arguments for csi-snapshotter controller sidecar
   extraArgs: []
-
 # -- Node sidecar for plugin registration
 csiNodeRegistrar:
   image:
-    repository: k8s.gcr.io/sig-storage/csi-node-driver-registrar
-    tag: v2.3.0
+    repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+    tag: v2.9.0
   # -- Extra arguments for csi-node-registrar node sidecar
   extraArgs: []
-
 controller:
   # -- Extra arguments for seagate-exos-x-csi-controller container
   extraArgs: [-v=0]
-
 node:
   # -- Extra arguments for seagate-exos-x-csi-node containers
   extraArgs: [-v=0]
-
 multipathd:
   # -- Extra arguments for multipathd containers
   extraArgs: []
-
 # -- Container that convert CSI liveness probe to kubernetes liveness/readiness probe
 nodeLivenessProbe:
   image:
-    repository: k8s.gcr.io/sig-storage/livenessprobe
-    tag: v2.4.0
+    repository: registry.k8s.io/sig-storage/livenessprobe
+    tag: v2.12.0
   # -- Extra arguments for the node's liveness probe containers
   extraArgs: []
-
 nodeServer:
   # -- Kubernetes nodeSelector field for seagate-exos-x-csi-node-server Pod
   nodeSelector:
   # -- Kubernetes nodeAffinity field for seagate-exos-x-csi-node-server Pod
   nodeAffinity:
-
 podMonitor:
-  # -- Set a Prometheus operator PodMonitor ressource (true or false)
+  # -- Set a Prometheus operator PodMonitor resource (true or false)
   enabled: false
-
 serviceMonitor:
-  # -- Set a Prometheus operator ServiceMonitor ressource (true or false)
+  # -- Set a Prometheus operator ServiceMonitor resource (true or false)
   enabled: false
-  

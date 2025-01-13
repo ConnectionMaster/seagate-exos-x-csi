@@ -29,9 +29,14 @@ spec:
             - seagate-exos-x-csi-controller
             - -bind=unix:///csi/csi.sock
 {{- include "csidriver.extraArgs" .Values.controller | indent 10 }}
+          env:
+            - name: CSI_NODE_SERVICE_PORT
+              value: "978"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+            - name: csi-run-dir
+              mountPath: /var/run/csi-exos-x.seagate.com
           ports:
             - containerPort: 9842
               name: metrics
@@ -76,7 +81,14 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml .Values.imagePullSecrets | indent 8 }}
+      {{- end }}
       volumes:
         - name: socket-dir
           emptyDir:
             medium: Memory
+        - name: csi-run-dir
+          hostPath:
+            path: /var/run/csi-exos-x.seagate.com

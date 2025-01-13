@@ -7,7 +7,7 @@ import (
 
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
 	"github.com/Seagate/seagate-exos-x-csi/pkg/node"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 var bind = flag.String("bind", fmt.Sprintf("unix:///var/run/%s/csi-node.sock", common.PluginName), "RPC bind URI (can be a UNIX socket path or any URI)")
@@ -24,7 +24,8 @@ func main() {
 		}
 	}
 
-
 	klog.Infof("starting storage node plugin (%s)", common.Version)
-	node.New().Start(*bind)
+	n := node.New()
+	defer n.Stop()
+	n.Start(*bind)
 }

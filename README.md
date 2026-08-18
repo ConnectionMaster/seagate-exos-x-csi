@@ -1,6 +1,6 @@
 # Seagate CSI dynamic provisioner for Kubernetes
 
-Seagate has officially ended support and maintenance for this project. Exos X storage arrays continue to expose standards-based block storage services through supported host connectivity protocols. Kubernetes administrators may consume those storage resources using their preferred storage orchestration, software-defined storage, or static provisioning methodology.
+## Seagate has officially ended support and maintenance for this project. Exos X storage arrays continue to expose standards-based block storage services through supported host connectivity protocols. Kubernetes administrators may consume those storage resources using their preferred storage orchestration, software-defined storage, or static provisioning methodology.
 
 The Seagate Exos X CSI Driver supports the following storage arrays
 
